@@ -4,6 +4,7 @@ import TelegramFrom from './TelegramFrom.js';
 import TelegramMessageEntity from './TelegramMessageEntity.js';
 import TelegramPhotoSize from './TelegramPhotoSize.js';
 import TelegramUser from './TelegramUser.js';
+import TelegramExternalReply from './TelegramExternalReply.js';
 
 interface TelegramMessage {
 	message_id: number;
@@ -19,6 +20,7 @@ interface TelegramMessage {
 	forward_date?: number;
 	is_automatic_forward?: boolean;
 	reply_to_message?: TelegramMessage;
+	external_reply?: TelegramExternalReply;
 	via_bot?: TelegramUser;
 	edit_date?: number;
 	has_protected_content?: boolean;

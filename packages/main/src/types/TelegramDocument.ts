@@ -8,4 +8,3 @@ export interface TelegramDocument {
 	file_unique_id: string;
 	file_size: number;
 }
-

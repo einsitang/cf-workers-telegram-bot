@@ -1,17 +1,17 @@
 version: 2
 updates:
-  - package-ecosystem: "npm"
-    directory: "/packages/main"
+  - package-ecosystem: 'npm'
+    directory: '/packages/main'
     schedule:
-      interval: "weekly"
+      interval: 'weekly'
     allow:
-      - dependency-type: "all"
+      - dependency-type: 'all'
     versioning-strategy: increase
 
-  - package-ecosystem: "npm"
-    directory: "/packages/worker"
+  - package-ecosystem: 'npm'
+    directory: '/packages/worker'
     schedule:
-      interval: "weekly"
+      interval: 'weekly'
     allow:
-      - dependency-type: "all"
+      - dependency-type: 'all'
     versioning-strategy: increase

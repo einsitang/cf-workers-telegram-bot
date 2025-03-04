@@ -1,290 +1,100 @@
 import TelegramBot, { TelegramExecutionContext } from '../../main/src/main.js';
-import { marked } from 'marked';
-
+import { MessageOriginUser } from '../../main/src/types/TelegramMessageOrigin.js';
+import { i18n } from './i18n/i18n.js';
+import { markdownToHtml } from './utils.js';
 export interface Environment {
 	SECRET_TELEGRAM_API_TOKEN: string;
-	SECRET_TELEGRAM_API_TOKEN2: string;
-	SECRET_TELEGRAM_API_TOKEN3: string;
+	// language
+	LOCAL: string;
+	// bot owner nickname , not bot name
+	NICK_NAME?: string;
+	// bot creator user id
+	CREATOR_USER_ID?: number;
+
 	AI: Ai;
 	DB: D1Database;
 	R2: R2Bucket;
 }
 
-type promiseFunc<T> = (resolve: (result: T) => void, reject: (e?: Error) => void) => Promise<T>;
-
-/**
- * Wrap setTimeout in a Promise
- * @param func - function to call after setTimeout
- * @param time - delay in milliseconds (default: 1000)
- */
-function wrapPromise<T>(func: promiseFunc<T>, time = 1000) {
-	return new Promise((resolve, reject) => {
-		setTimeout(() => {
-			func(resolve, reject).catch((e: unknown) => {
-				console.error('Error in wrapPromise:', e);
-			});
-		}, time);
-	});
-}
-
-/**
- * Convert markdown to html that Telegram can parse
- * @param s - the string containing markdown
- * @returns HTML formatted string compatible with Telegram
- */
-async function markdownToHtml(s: string) {
-	marked.setOptions(marked.getDefaults());
-	const parsed = await marked.parse(s);
-	const tagsToRemove = ['p', 'ol', 'ul', 'li', 'h1', 'h2', 'h3'];
-	const tagPattern = new RegExp(tagsToRemove.map((tag) => `<${tag}>|</${tag}>`).join('|'), 'g');
-	return parsed.replace(tagPattern, '');
-}
-
-// Constants for system prompts
-const SYSTEM_PROMPTS = {
-	TUX_ROBOT: 'You are a friendly assistant named TuxRobot. Use lots of emojis in your responses.',
-	SEAN: 'You are a friendly person named Sean. Sometimes just acknowledge messages with okay. You are working on coding a cool telegram bot. You are 26 years old and from Toronto, Canada.',
-};
-
 // AI model constants
-const AI_MODELS = {
-	LLAMA: '@cf/meta/llama-3.2-11b-vision-instruct',
-	CODER: '@hf/thebloke/deepseek-coder-6.7b-instruct-awq',
-	FLUX: '@cf/black-forest-labs/flux-1-schnell',
-	STABLE_DIFFUSION: '@cf/stabilityai/stable-diffusion-xl-base-1.0',
-};
+const TRANSLATION_AI_MODEL = '@cf/meta/m2m100-1.2b';
 
 export default {
-	fetch: async (request: Request, env: Environment, ctx: ExecutionContext) => {
-		const tuxrobot = new TelegramBot(env.SECRET_TELEGRAM_API_TOKEN);
-		const duckduckbot = new TelegramBot(env.SECRET_TELEGRAM_API_TOKEN2);
-		const translatepartybot = new TelegramBot(env.SECRET_TELEGRAM_API_TOKEN3);
+	fetch: async (request: Request, env: Environment) => {
+		const introduction = i18n(env.LOCAL).introduction(env.NICK_NAME ?? 'Bin');
+		const asistantBot = new TelegramBot(env.SECRET_TELEGRAM_API_TOKEN, {
+			creatorId: env.CREATOR_USER_ID,
+		});
 
-		await Promise.all([
-			tuxrobot
-				.on(':document', async (bot: TelegramExecutionContext) => {
-					const fileId: string = bot.update.message?.document?.file_id ?? '';
-					const fileResponse = await bot.getFile(fileId);
-					const id = crypto.randomUUID().slice(0, 5);
-					await env.R2.put(id, await fileResponse.arrayBuffer());
-					await bot.reply(`https://r2.seanbehan.ca/${id}`);
-					return new Response('ok');
-				})
-				.on('epoch', async (bot: TelegramExecutionContext) => {
-					if (bot.update_type === 'message') {
-						await bot.reply(Math.floor(Date.now() / 1000).toString());
-					}
-					return new Response('ok');
-				})
+		const results = await Promise.all([
+			asistantBot
 				.on('start', async (bot: TelegramExecutionContext) => {
 					if (bot.update_type === 'message') {
-						await bot.reply(
-							'Send me a message to talk to llama3. Use /clear to wipe history. Use /photo to generate a photo. Use /code to generate code.',
-						);
-					}
-					return new Response('ok');
-				})
-				.on('code', async (bot: TelegramExecutionContext) => {
-					if (bot.update_type === 'message') {
-						await bot.sendTyping();
-						const prompt = bot.update.message?.text?.toString().split(' ').slice(1).join(' ') ?? '';
-						const messages = [{ role: 'user', content: prompt }];
-
-						try {
-							// @ts-expect-error broken bindings
-							const response = await env.AI.run(AI_MODELS.CODER, { messages });
-
-							if ('response' in response) {
-								await bot.reply(await markdownToHtml(response.response ?? ''), 'HTML');
-							}
-						} catch (e) {
-							console.error('Error in code handler:', e);
-							await bot.reply(`Error: ${e as string}`);
-						}
-					}
-					return new Response('ok');
-				})
-				.on('clear', async (bot: TelegramExecutionContext) => {
-					if (bot.update_type === 'message') {
-						await env.DB.prepare('DELETE FROM Messages WHERE userId=?').bind(bot.update.message?.from.id).run();
-						await bot.reply('History cleared');
+						await bot.reply(introduction);
 					}
 					return new Response('ok');
 				})
 				.on(':message', async (bot: TelegramExecutionContext) => {
-					switch (bot.update_type) {
-						case 'message': {
+					if (bot.update_type === 'message') {
+						const msg = bot.update.message;
+						const fromChat = msg?.from;
+
+						const originMsgText = msg?.text ?? '';
+
+						if (!bot.isFromCreator()) {
+							// forward message
 							await bot.sendTyping();
-							const prompt = bot.update.message?.text?.toString() ?? '';
-							const { results } = await env.DB.prepare('SELECT * FROM Messages WHERE userId=?').bind(bot.update.message?.from.id).all();
-							const messageHistory = results.map((col) => ({ role: 'system', content: col.content as string }));
+							const aiResp = await env.AI.run(TRANSLATION_AI_MODEL, {
+								text: originMsgText,
+								target_lang: 'chinese',
+							});
+							const translatedText = aiResp.translated_text ?? '';
 
-							const messages = [
-								{ role: 'system', content: SYSTEM_PROMPTS.TUX_ROBOT },
-								...messageHistory,
-								{ role: 'user', content: prompt },
-							];
+							// reply user sender
+							await bot.reply('got it!');
 
-							try {
-								// @ts-expect-error broken bindings
-								const response = await env.AI.run(AI_MODELS.LLAMA, { messages });
-
-								if ('response' in response && response.response) {
-									await bot.reply(await markdownToHtml(response.response), 'HTML');
-
-									await env.DB.prepare('INSERT INTO Messages (id, userId, content) VALUES (?, ?, ?)')
-										.bind(crypto.randomUUID(), bot.update.message?.from.id, `'[INST] ${prompt} [/INST] \n ${response.response}`)
-										.run();
-								}
-							} catch (e) {
-								console.error('Error in message handler:', e);
-								await bot.reply(`Error: ${e as string}`);
+							// forward message to admin
+							await bot.forwardMessage(bot.getCreatorId());
+							// paging admin
+							const pagingMsg = i18n(env.LOCAL).translatedPaging(translatedText);
+							const sendPagingResult = await bot.sendMessage(bot.getCreatorId(), await markdownToHtml(pagingMsg), {
+								reply_parameters: {
+									chat_id: fromChat?.id,
+									message_id: msg?.message_id,
+								},
+							});
+							const sendPagingResultJson: {
+								ok: boolean;
+								[key: string]: unknown;
+							} = await sendPagingResult.json();
+							if (!sendPagingResultJson.ok) {
+								console.debug(JSON.stringify(sendPagingResultJson));
 							}
-							break;
-						}
-
-						case 'inline': {
-							const messages = [
-								{ role: 'system', content: SYSTEM_PROMPTS.TUX_ROBOT },
-								{ role: 'user', content: bot.update.inline_query?.query.toString() ?? '' },
-							];
-
-							try {
-								// @ts-expect-error broken bindings
-								const response = await env.AI.run(AI_MODELS.LLAMA, { messages, max_tokens: 100 });
-
-								if ('response' in response) {
-									await bot.replyInline(response.response ?? '', await markdownToHtml(response.response ?? ''), 'HTML');
-								}
-							} catch (e) {
-								console.error('Error in inline handler:', e);
-								await bot.reply(`Error: ${e as string}`);
+						} else {
+							const origin = msg?.reply_to_message?.external_reply?.origin;
+							if (origin != null) {
+								// reply origin sender
+								const senderUid = (origin as MessageOriginUser).sender_user.id;
+								console.log('origin sender id', senderUid, 'msg:', msg?.text ?? '');
+								const r = await bot.sendMessage(senderUid, msg?.text ?? '');
+								console.log(await r.text());
+							} else {
+								console.debug(msg?.reply_to_message);
+								// remind admin how to do for reply user message
+								await bot.reply(i18n(env.LOCAL).remindReplyToSendMessage);
 							}
-							break;
 						}
-
-						case 'business_message': {
-							await bot.sendTyping();
-							const fileId: string = bot.update.business_message?.photo?.pop()?.file_id ?? '';
-							const fileResponse = await bot.getFile(fileId);
-							const blob = await fileResponse.arrayBuffer();
-							const prompt = bot.update.business_message?.text?.toString() ?? bot.update.business_message?.caption ?? '';
-
-							if (bot.update.business_message?.from.id !== 69148517) {
-								const { results } = await env.DB.prepare('SELECT * FROM Messages WHERE userId=?')
-									.bind(bot.update.business_message?.from.id)
-									.all();
-
-								const messageHistory = results.map((col) => ({ role: 'system', content: col.content as string }));
-
-								const messages = [{ role: 'system', content: SYSTEM_PROMPTS.SEAN }, ...messageHistory, { role: 'user', content: prompt }];
-
-								try {
-									let response;
-
-									if (blob.byteLength === 0) {
-										// @ts-expect-error broken bindings
-										response = await env.AI.run(AI_MODELS.LLAMA, { messages });
-									} else {
-										// @ts-expect-error broken bindings
-										response = await env.AI.run(AI_MODELS.LLAMA, { messages, image: [...new Uint8Array(blob)] });
-									}
-
-									if ('response' in response && response.response) {
-										await bot.reply(await markdownToHtml(response.response), 'HTML');
-
-										await env.DB.prepare('INSERT INTO Messages (id, userId, content) VALUES (?, ?, ?)')
-											.bind(crypto.randomUUID(), bot.update.business_message?.from.id, `'[INST] ${prompt} [/INST] \n ${response.response}`)
-											.run();
-									}
-								} catch (e) {
-									console.error('Error in business message handler:', e);
-									await bot.reply(`Error: ${e as string}`);
-								}
-							}
-							break;
-						}
-					}
-					return new Response('ok');
-				})
-				.on('photo', async (bot: TelegramExecutionContext) => {
-					if (bot.update_type === 'message') {
-						await bot.sendTyping();
-						const prompt = bot.update.message?.text?.toString() ?? '';
-
-						try {
-							// @ts-expect-error broken bindings
-							const photo = (await env.AI.run(AI_MODELS.FLUX, { prompt, steps: 8 })) as { image: string };
-
-							const binaryString = atob(photo.image);
-							// @ts-expect-error broken bindings
-							const img = Uint8Array.from(binaryString, (m) => m.codePointAt(0));
-							const photoFile = new File([await new Response(img).blob()], 'photo');
-							const id = crypto.randomUUID();
-
-							await env.R2.put(id, photoFile);
-							console.log(`https://r2.seanbehan.ca/${id}`);
-							await bot.replyPhoto(`https://r2.seanbehan.ca/${id}`);
-
-							ctx.waitUntil(
-								wrapPromise(async () => {
-									await env.R2.delete(id);
-								}, 500),
-							);
-						} catch (e) {
-							console.error('Error in photo handler:', e);
-							await bot.reply(`Error: ${e as string}`);
-						}
-					}
-					return new Response('ok');
-				})
-				.handle(request.clone()),
-
-			duckduckbot
-				.on(':message', async (bot: TelegramExecutionContext) => {
-					switch (bot.update_type) {
-						case 'message': {
-							await bot.reply('https://duckduckgo.com/?q=' + encodeURIComponent(bot.update.message?.text?.toString() ?? ''));
-							break;
-						}
-						case 'inline': {
-							await bot.reply('https://duckduckgo.com/?q=' + encodeURIComponent(bot.update.inline_query?.query ?? ''));
-							break;
-						}
-					}
-					return new Response('ok');
-				})
-				.handle(request.clone()),
-
-			translatepartybot
-				.on(':message', async (bot: TelegramExecutionContext) => {
-					switch (bot.update_type) {
-						case 'inline': {
-							try {
-								const query = encodeURIComponent(bot.update.inline_query?.query.toString() ?? '');
-								const response = await fetch(
-									`https://translate.googleapis.com/translate_a/single?sl=auto&tl=en&dt=t&dj=1&prev=input&ie=utf-8&oe=utf-8&client=gtx&q=${query}`,
-								);
-
-								const json = await response.json();
-								const translatedText = (json as { sentences: [{ trans: string; orig: string; backend: number }] }).sentences[0].trans;
-
-								await bot.reply(translatedText);
-							} catch (e) {
-								console.error('Error in translate handler:', e);
-								await bot.reply(`Translation error: ${e as string}`);
-							}
-							break;
-						}
-						case 'message':
-							await bot.reply('Use me in inline mode by typing @TranslatePartyBot and the text you want to translate.');
-							break;
 					}
 					return new Response('ok');
 				})
 				.handle(request.clone()),
 		]);
 
+		for (const r of results) {
+			if (r.status !== 200) {
+				return r;
+			}
+		}
 		return new Response('ok');
 	},
 };
